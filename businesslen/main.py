@@ -16,14 +16,16 @@ _ERRCODE_MESSAGE = {
     0: "No error",
     1: "Invalid start_dt or end_dt",
     2: "Invalid workweek_schedule",
-    4: "Invalid offdays"
+    3: "Invalid offdays",
+    4: "Invalid lunch_hour"
     }
 
 
 class BusinessLen:
 
     def __init__(self, start_dt, end_dt,
-                 workweek_schedule=_DEFAULT_WORKWEEK_SCHEDULE, offdays="US"):
+                 workweek_schedule=_DEFAULT_WORKWEEK_SCHEDULE,
+                 lunch_hour=12, offdays="US"):
         """Main object
 
         Keyword arguments:
@@ -39,31 +41,30 @@ class BusinessLen:
             The key is an int following datetime weekday() function where
             Monday is 0 and Sunday is 6. The value is a tuple with two ints:
             the start hour and the end hour in 24 hour format (0 to 23).
-        offdays -- either an ISO country code or list of datetime dates to be
+        lunch_hour -- int
+        offdays -- either an ISO country code or tuple of datetime dates to be
                    considered as holidays
         """
-        self.ok, self.errcode = _verify_init(
-            start_dt, end_dt, workweek_schedule, offdays
+        self._ok, self._errcode = _verify_init(
+            start_dt, end_dt, workweek_schedule, lunch_hour, offdays
             )
-        self.errmess = _ERRCODE_MESSAGE[self.errcode]
-        _total_work_hours = -1
-        self.days, self.hours, self.minutes, self.seconds = -1, -1, -1, -1
-        if self.ok:
-            if isinstance(offdays, str):
-                _offdays = holidays.CountryHoliday(offdays)
-            else:
-                _offdays = offdays
-            _workhour_lookup = _build_workhour_lookup(workweek_schedule)
-            _total_work_hours = _calculate_work_hours(
-                start_dt, end_dt, _workhour_lookup, _offdays
-                )
-            self.days = _total_work_hours / 8
-            self.hours = _total_work_hours
-            self.minutes = round(_total_work_hours * 60)
-            self.seconds = round(_total_work_hours * 3600)
+        self._errmess = _ERRCODE_MESSAGE[self._errcode]
+        if not self._ok:
+            raise ValueError(self._errmess)
+        if isinstance(offdays, str):
+            _offdays = holidays.CountryHoliday(offdays)
+        else:
+            _offdays = offdays
+        _workhour_lookup = _build_workhour_lookup(workweek_schedule,
+                                                  lunch_hour)
+        self.hours = _calculate_work_hours(
+            start_dt, end_dt, workweek_schedule, lunch_hour, _workhour_lookup,
+            _offdays
+            )
+        self.days = self.hours / 8
 
 
-def _verify_init(start_dt, end_dt, workweek_schedule, offdays):
+def _verify_init(start_dt, end_dt, workweek_schedule, lunch_hour, offdays):
     # start_dt & end_dt
     is_valid_period = (
         isinstance(start_dt, datetime) and isinstance(end_dt, datetime)
@@ -75,15 +76,19 @@ def _verify_init(start_dt, end_dt, workweek_schedule, offdays):
     is_valid_workweek_schedule = _verify_workweek_schedule(workweek_schedule)
     if not is_valid_workweek_schedule:
         return (False, 2)
-    # holidays country code
+    # lunch_hour
+    if not (isinstance(lunch_hour, int) and 0 <= lunch_hour <= 23):
+        return (False, 4)
+    # offdays
     if isinstance(offdays, str):
         try:
             holidays.CountryHoliday(offdays)
-        except KeyError:
+        except KeyError:  # package behavior
             return (False, 3)
-    elif isinstance(offdays, list):
+    elif isinstance(offdays, tuple):
         for d in offdays:
-            if not isinstance(d, datetime):
+            if not (isinstance(d, datetime)
+                    and datetime(d.year, d.month, d.day) == d):
                 return (False, 3)
     else:
         return (False, 3)
@@ -106,7 +111,7 @@ def _verify_workweek_schedule(schedule):
         start_hour, end_hour = work_hours[0], work_hours[1]
         valid_work_hours = (
             isinstance(start_hour, int) and isinstance(end_hour, int)
-            and 0 <= start_hour <= 24 and 0 <= end_hour <= 24 and
+            and 0 <= start_hour <= 23 and 0 <= end_hour <= 23 and
             start_hour < end_hour
             )
         if not valid_work_hours:
@@ -114,7 +119,7 @@ def _verify_workweek_schedule(schedule):
     return True
 
 
-def _build_workhour_lookup(schedule):
+def _build_workhour_lookup(schedule, lunch_hour):
     """Build a lookup dict to determine whether a given hour of a given day of
     week is a work hour.
     """
@@ -125,22 +130,23 @@ def _build_workhour_lookup(schedule):
         start_h, end_h = schedule[dow][0], schedule[dow][1]
         for wh in range(start_h, end_h):
             res[dow][wh] = True
-        res[dow][12] = False  # lunch break
+        res[dow][lunch_hour] = False
     return res
 
 
-def _calculate_work_hours(sh, eh, wh_lookup, offdays):
-    """Calculate the total work hours in a period. The algorithm is simple and
-    not most efficient but the performance hit is negligible. We start by
-    "trimming" the start hour and the end hour by rounding them down and up,
-    respectively, and add any decimal parts if either one is a work hour. Then
-    we begin the main loop that keeps increasing the start hour by one hour and
-    adding it to the total work hours if the increased hour is a work hour
-    until the start hour equals the end hour.
+def _calculate_work_hours(sh, eh, ww_schedule, lunch_hour, wh_lookup, offdays):
+    """Calculate the total work hours in a period.
+    - If sh and eh are within the same hour, subtract, done
+    - Round up sh and round down eh
+    - If sh and eh belong to the same day, increase sh until sh equals eh, done
+    - Else, increase sh until end of day, decrease eh until start of day
+    - Loop over days in between
     """
     total_hours = 0
-    # if eh and sh within an hour, we simply subtract
-    if datetime.date(eh) == datetime.date(sh) and sh.hour == eh.hour \
+    sh_date = _round_down_date(sh)
+    eh_date = _round_down_date(eh)
+    # if eh and sh within an hour
+    if sh_date == eh_date and sh.hour == eh.hour \
             and _is_workhour(sh, wh_lookup, offdays):
         return (eh - sh).seconds/3600
 
@@ -153,18 +159,46 @@ def _calculate_work_hours(sh, eh, wh_lookup, offdays):
     if _is_workhour(sh, wh_lookup, offdays):
         total_hours += (sh_next_hour - sh).seconds/3600
     sh = sh_next_hour
-    # main loop
-    while sh < eh:
+    # if eh and sh belong to the same day
+    if sh_date == eh_date:
+        while sh < eh:
+            if _is_workhour(sh, wh_lookup, offdays):
+                total_hours += 1
+            sh += timedelta(hours=1)
+        return total_hours
+    # else
+    ## sh to end of day, eh to start of day
+    sh_upper = sh_date+ timedelta(days=1)
+    while sh < sh_upper:
         if _is_workhour(sh, wh_lookup, offdays):
             total_hours += 1
         sh += timedelta(hours=1)
+    while eh > eh_date:
+        eh -= timedelta(hours=1)
+        if _is_workhour(eh, wh_lookup, offdays):
+            total_hours += 1
+    ## loop over days
+    start_date = sh_date + timedelta(days=1)
+    while start_date < eh_date:
+        weekday = start_date.weekday()
+        if ww_schedule[weekday] and start_date not in offdays:
+            start_hour = ww_schedule[weekday][0]
+            end_hour = ww_schedule[weekday][1]
+            total_hours += end_hour - start_hour
+            if start_hour <= lunch_hour < end_hour:
+                total_hours -= 1
+        start_date += timedelta(days=1)
     return total_hours
 
 
 def _is_workhour(dt, wh_lookup, offdays):
-    return not datetime(dt.year, dt.month, dt.day, 0, 0, 0) in offdays \
+    return not _round_down_date(dt) in offdays \
         and wh_lookup[dt.weekday()][dt.hour]
 
 
 def _round_down_hour(dt):
     return dt - timedelta(minutes=dt.minute, seconds=dt.second)
+
+
+def _round_down_date(dt):
+    return datetime(dt.year, dt.month, dt.day)
