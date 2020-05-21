@@ -23,14 +23,9 @@ _ERRCODE_MESSAGE = {
 
 class BusinessLen:
 
-    def __init__(self, start_dt, end_dt,
-                 workweek_schedule=_DEFAULT_WORKWEEK_SCHEDULE,
+    def __init__(self, workweek_schedule=_DEFAULT_WORKWEEK_SCHEDULE,
                  lunch_hour=12, offdays="US"):
-        """Main object
-
-        Keyword arguments:
-        start_dt -- a datetime object
-        end_dt -- a datetime object
+        """Keyword arguments:
         workweek_schedule --
             a dict that defines weekly work hours; has following format
             {
@@ -45,33 +40,34 @@ class BusinessLen:
         offdays -- either an ISO country code or tuple of datetime dates to be
                    considered as holidays
         """
-        self._ok, self._errcode = _verify_init(
-            start_dt, end_dt, workweek_schedule, lunch_hour, offdays
-            )
-        self._errmess = _ERRCODE_MESSAGE[self._errcode]
-        if not self._ok:
-            raise ValueError(self._errmess)
+        _ok, _errcode = _verify_init(workweek_schedule, lunch_hour, offdays)
+        if not _ok:
+            raise ValueError(_ERRCODE_MESSAGE[_errcode])
         if isinstance(offdays, str):
-            _offdays = holidays.CountryHoliday(offdays)
+            self._offdays = holidays.CountryHoliday(offdays)
         else:
-            _offdays = offdays
-        _workhour_lookup = _build_workhour_lookup(workweek_schedule,
-                                                  lunch_hour)
-        self.hours = _calculate_work_hours(
-            start_dt, end_dt, workweek_schedule, lunch_hour, _workhour_lookup,
-            _offdays
+            self._offdays = offdays
+        self._workweek_schedule = workweek_schedule
+        self._lunch_hour = lunch_hour
+        self._workhour_lookup = _build_workhour_lookup(workweek_schedule,
+                                                       lunch_hour)
+
+    def hours(self, start_dt, end_dt):
+        """Calculate for another period."""
+        _ok = _verify_dt(start_dt, end_dt)
+        if not _ok:
+            raise ValueError(_ERRCODE_MESSAGE[1])
+        self.h = _calculate_work_hours(
+            start_dt, end_dt, self._workweek_schedule, self._lunch_hour,
+            self._workhour_lookup, self._offdays
             )
-        self.days = self.hours / 8
+        return self.h
+
+    def days(self):
+        return self.h / 8
 
 
-def _verify_init(start_dt, end_dt, workweek_schedule, lunch_hour, offdays):
-    # start_dt & end_dt
-    is_valid_period = (
-        isinstance(start_dt, datetime) and isinstance(end_dt, datetime)
-        and end_dt >= start_dt
-        )
-    if not is_valid_period:
-        return (False, 1)
+def _verify_init(workweek_schedule, lunch_hour, offdays):
     # workweek_schedule
     is_valid_workweek_schedule = _verify_workweek_schedule(workweek_schedule)
     if not is_valid_workweek_schedule:
@@ -93,6 +89,11 @@ def _verify_init(start_dt, end_dt, workweek_schedule, lunch_hour, offdays):
     else:
         return (False, 3)
     return (True, 0)
+
+
+def _verify_dt(start_dt, end_dt):
+    return isinstance(start_dt, datetime) and isinstance(end_dt, datetime) \
+        and end_dt >= start_dt
 
 
 def _verify_workweek_schedule(schedule):
